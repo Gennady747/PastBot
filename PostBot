@@ -1,4 +1,4 @@
- # bot.py — Полная версия Content Formatter Bot (с кнопками Назад везде)
+# bot.py — Полная версия с выбором "Сейчас" или "Запланировать"
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -44,8 +44,9 @@ class BlockSetup(StatesGroup):
 class PostCreation(StatesGroup):
     waiting_main_text = State()
     waiting_media = State()
-    waiting_channel = State()
-    waiting_schedule_time = State()
+    waiting_publish_choice = State()  # Выбор: сейчас или запланировать
+    waiting_channel_now = State()     # Сразу публикация - ждём канал
+    waiting_schedule_time = State()   # Отложенная - ждём дату
 
 class GalleryUpload(StatesGroup):
     waiting_photo = State()
@@ -70,13 +71,11 @@ def main_menu():
     ])
 
 def back_button(callback_data="back_main"):
-    """Кнопка назад для inline клавиатур"""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="← Назад", callback_data=callback_data)]
     ])
 
 def cancel_button():
-    """Кнопка отмены для FSM состояний"""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_fsm")]
     ])
@@ -137,10 +136,9 @@ async def check_subscription(uid: int) -> bool:
         return True
     return False
 
-# ====================== ОБРАБОТЧИК ОТМЕНЫ FSM ======================
+# ====================== ОБРАБОТЧИК ОТМЕНЫ ======================
 @router.callback_query(F.data == "cancel_fsm")
 async def cancel_fsm(callback: CallbackQuery, state: FSMContext):
-    """Отмена любого FSM состояния и возврат в меню"""
     await state.clear()
     await callback.message.edit_text("❌ Отменено. Главное меню:", reply_markup=main_menu())
     await callback.answer()
@@ -336,7 +334,6 @@ async def edit_block(callback: CallbackQuery, state: FSMContext):
             f"• Ссылки (https://...)\n"
             f"• Цитаты (используй HTML &lt;blockquote&gt;)")
     
-    # Кнопка отмены для FSM состояния
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❌ Отмена", callback_data="blocks_menu")]
     ])
@@ -506,7 +503,7 @@ async def choose_image(callback: CallbackQuery, state: FSMContext):
         if gallery:
             photo_id = random.choice(gallery)
             await state.update_data(photo_id=photo_id, full_text=full_text)
-            await show_preview(callback.message, state)
+            await show_preview_with_choice(callback.message, state)
         else:
             kb = back_button("create_post")
             await callback.message.edit_text("❌ Галерея пуста!", reply_markup=kb)
@@ -514,7 +511,7 @@ async def choose_image(callback: CallbackQuery, state: FSMContext):
             
     else:  # no_image
         await state.update_data(photo_id=None, full_text=full_text)
-        await show_preview(callback.message, state, edit=False)
+        await show_preview_with_choice(callback.message, state, edit=False)
         return
     
     await callback.answer()
@@ -526,9 +523,11 @@ async def select_specific_photo(callback: CallbackQuery, state: FSMContext):
     photos = data["available_photos"]
     
     await state.update_data(photo_id=photos[idx])
-    await show_preview(callback.message, state)
+    await show_preview_with_choice(callback.message, state)
 
-async def show_preview(message: Message, state: FSMContext, edit=True):
+# ====================== ПРЕДПРОСМОТР С ВЫБОРОМ ======================
+async def show_preview_with_choice(message: Message, state: FSMContext, edit=True):
+    """Показывает предпросмотр с выбором: Сейчас или Запланировать"""
     data = await state.get_data()
     full_text = data["full_text"]
     photo_id = data.get("photo_id")
@@ -539,13 +538,15 @@ async def show_preview(message: Message, state: FSMContext, edit=True):
                     f"⚙️ Настройки: "
                     f"{'🔕 ' if settings['silent'] else '🔔 '}"
                     f"{'🔒 ' if settings['protect'] else '🔓 '}"
-                    f"{'🔗 ' if settings['disable_preview'] else '🌐 '}")
+                    f"{'🔗 ' if settings['disable_preview'] else '🌐 '}\n\n"
+                    f"<b>Выберите действие:</b>")
     
+    # ГЛАВНЫЕ КНОПКИ ВЫБОРА
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📢 Опубликовать сейчас", callback_data="publish_now")],
-        [InlineKeyboardButton(text="📅 Запланировать", callback_data="schedule_post")],
-        [InlineKeyboardButton(text="✏️ Изменить текст", callback_data="create_post")],
-        [InlineKeyboardButton(text="← Назад", callback_data="back_main")]
+        [InlineKeyboardButton(text="📢 ОПУБЛИКОВАТЬ СЕЙЧАС", callback_data="publish_now_choice")],
+        [InlineKeyboardButton(text="📅 ЗАПЛАНИРОВАТЬ", callback_data="schedule_choice")],
+        [InlineKeyboardButton(text="✏️ Изменить текст", callback_data="create_post"),
+         InlineKeyboardButton(text="← Назад", callback_data="back_main")]
     ])
     
     if photo_id:
@@ -562,128 +563,205 @@ async def show_preview(message: Message, state: FSMContext, edit=True):
         else:
             await message.answer(preview_text, reply_markup=kb)
     
-    await state.set_state(PostCreation.waiting_channel)
+    await state.set_state(PostCreation.waiting_publish_choice)
 
-@router.callback_query(F.data == "publish_now")
-async def publish_now(callback: CallbackQuery, state: FSMContext):
+# ====================== ОПУБЛИКОВАТЬ СЕЙЧАС ======================
+@router.callback_query(F.data == "publish_now_choice")
+async def publish_now_choice(callback: CallbackQuery, state: FSMContext):
+    """Выбрали публикацию сейчас - просим ID канала"""
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="← Назад к выбору", callback_data="back_to_preview")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="back_main")]
     ])
-    await callback.message.edit_text(
-        "📢 Отправь ID канала для публикации:\n"
+    
+    await callback.message.edit_caption(
+        caption="📢 <b>Публикация сейчас</b>\n\n"
+                "Отправь ID канала для публикации:\n"
+                "Например: @mychannel или -1001234567890\n\n"
+                "❗️ Бот должен быть администратором канала!",
+        reply_markup=kb
+    ) if callback.message.photo else await callback.message.edit_text(
+        "📢 <b>Публикация сейчас</b>\n\n"
+        "Отправь ID канала для публикации:\n"
         "Например: @mychannel или -1001234567890\n\n"
         "❗️ Бот должен быть администратором канала!",
         reply_markup=kb
     )
-    await state.update_data(action="publish")
+    
+    await state.set_state(PostCreation.waiting_channel_now)
     await callback.answer()
 
-@router.callback_query(F.data == "schedule_post")
-async def schedule_post(callback: CallbackQuery, state: FSMContext):
+@router.message(PostCreation.waiting_channel_now)
+async def process_publish_now(message: Message, state: FSMContext):
+    """Обработка публикации сейчас"""
+    data = await state.get_data()
+    full_text = data["full_text"]
+    photo_id = data.get("photo_id")
+    uid = message.from_user.id
+    settings = user_data[uid]["settings"]
+    channel_id = message.text.strip()
+    
+    try:
+        chat = await bot.get_chat(channel_id)
+        member = await bot.get_chat_member(channel_id, bot.id)
+        
+        if not member.can_post_messages:
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="publish_now_choice")],
+                [InlineKeyboardButton(text="← Назад", callback_data="back_to_preview")]
+            ])
+            await message.answer("❌ У бота нет прав на публикацию!\nПроверьте права администратора.", reply_markup=kb)
+            return
+        
+        # ПУБЛИКУЕМ!
+        if photo_id:
+            await bot.send_photo(
+                channel_id, 
+                photo_id, 
+                caption=full_text,
+                disable_notification=settings["silent"],
+                protect_content=settings["protect"]
+            )
+        else:
+            await bot.send_message(
+                channel_id, 
+                full_text,
+                disable_notification=settings["silent"],
+                protect_content=settings["protect"],
+                disable_web_page_preview=settings["disable_preview"]
+            )
+        
+        user_data[uid]["stats"]["posts"] += 1
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📝 Новый пост", callback_data="create_post")],
+            [InlineKeyboardButton(text="← Главное меню", callback_data="back_main")]
+        ])
+        
+        await message.answer(
+            f"✅ Пост опубликован в канал <b>{chat.title}</b>!\n\n"
+            f"📊 Всего опубликовано: {user_data[uid]['stats']['posts']}",
+            reply_markup=kb
+        )
+        await state.clear()
+        
+    except TelegramAPIError as e:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="publish_now_choice")],
+            [InlineKeyboardButton(text="← Назад", callback_data="back_to_preview")]
+        ])
+        await message.answer(f"❌ Ошибка: {e}\n\nПроверьте ID канала и права бота.", reply_markup=kb)
+
+# ====================== ЗАПЛАНИРОВАТЬ ======================
+@router.callback_query(F.data == "schedule_choice")
+async def schedule_choice(callback: CallbackQuery, state: FSMContext):
+    """Выбрали запланировать - просим дату"""
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="← Назад к выбору", callback_data="back_to_preview")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="back_main")]
     ])
-    await callback.message.edit_text(
-        "📅 Запланировать пост.\n\n"
+    
+    await callback.message.edit_caption(
+        caption="📅 <b>Запланировать пост</b>\n\n"
+                "Отправь дату и время в формате:\n"
+                "<code>ДД.ММ.ГГГГ ЧЧ:ММ</code>\n"
+                "Например: <code>15.04.2026 14:30</code>\n\n"
+                "Также отправь ID канала через пробел:\n"
+                "<code>ДД.ММ.ГГГГ ЧЧ:ММ @channel</code>",
+        reply_markup=kb
+    ) if callback.message.photo else await callback.message.edit_text(
+        "📅 <b>Запланировать пост</b>\n\n"
         "Отправь дату и время в формате:\n"
         "<code>ДД.ММ.ГГГГ ЧЧ:ММ</code>\n"
-        "Например: <code>15.04.2026 14:30</code>",
+        "Например: <code>15.04.2026 14:30</code>\n\n"
+        "Также отправь ID канала через пробел:\n"
+        "<code>ДД.ММ.ГГГГ ЧЧ:ММ @channel</code>",
         reply_markup=kb
     )
-    await state.update_data(action="schedule")
+    
+    await state.set_state(PostCreation.waiting_schedule_time)
     await callback.answer()
 
-@router.message(PostCreation.waiting_channel)
-async def process_channel_or_time(message: Message, state: FSMContext):
+@router.message(PostCreation.waiting_schedule_time)
+async def process_schedule(message: Message, state: FSMContext):
+    """Обработка планирования"""
     data = await state.get_data()
-    action = data["action"]
     full_text = data["full_text"]
     photo_id = data.get("photo_id")
     uid = message.from_user.id
     settings = user_data[uid]["settings"]
     
-    if action == "schedule":
-        try:
-            dt = datetime.strptime(message.text, "%d.%m.%Y %H:%M")
-            if dt < datetime.now():
-                kb = cancel_button()
-                await message.answer("❌ Дата уже прошла! Введите будущую дату или отмени:", reply_markup=kb)
-                return
-            
-            post_id = str(uuid.uuid4())[:8]
-            scheduled_posts.append((
-                dt, uid, None, full_text, photo_id, post_id,
-                settings["silent"], settings["protect"], settings["disable_preview"]
-            ))
-            
-            user_data[uid]["stats"]["scheduled_active"] += 1
-            
+    try:
+        # Парсим формат: ДД.ММ.ГГГГ ЧЧ:ММ @channel
+        parts = message.text.split(maxsplit=2)
+        if len(parts) < 2:
+            raise ValueError("Неверный формат")
+        
+        dt_str = parts[0] + " " + parts[1]
+        channel_id = parts[2] if len(parts) > 2 else None
+        
+        if not channel_id:
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📅 К запланированным", callback_data="scheduled")],
-                [InlineKeyboardButton(text="← Главное меню", callback_data="back_main")]
+                [InlineKeyboardButton(text="← Назад", callback_data="schedule_choice")]
             ])
-            
-            await message.answer(
-                f"✅ Пост запланирован!\n"
-                f"📅 Дата: {dt.strftime('%d.%m.%Y %H:%M')}\n"
-                f"🆔 ID: <code>{post_id}</code>",
-                reply_markup=kb
-            )
-            await state.clear()
-            
-        except ValueError:
-            kb = cancel_button()
-            await message.answer("❌ Неверный формат! Используй: ДД.ММ.ГГГГ ЧЧ:ММ\nИли отмени:", reply_markup=kb)
+            await message.answer("❌ Укажите ID канала!\n\nФормат: <code>ДД.ММ.ГГГГ ЧЧ:ММ @channel</code>", reply_markup=kb)
             return
-    
-    else:  # publish now
-        channel_id = message.text.strip()
+        
+        dt = datetime.strptime(dt_str, "%d.%m.%Y %H:%M")
+        if dt < datetime.now():
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="← Назад", callback_data="schedule_choice")]
+            ])
+            await message.answer("❌ Дата уже прошла! Введите будущую дату.", reply_markup=kb)
+            return
+        
+        # Проверяем канал
         try:
             chat = await bot.get_chat(channel_id)
             member = await bot.get_chat_member(channel_id, bot.id)
-            
             if not member.can_post_messages:
-                kb = cancel_button()
-                await message.answer("❌ У бота нет прав на публикацию!\nПроверьте права или отмени:", reply_markup=kb)
-                return
-            
-            if photo_id:
-                await bot.send_photo(
-                    channel_id, 
-                    photo_id, 
-                    caption=full_text,
-                    disable_notification=settings["silent"],
-                    protect_content=settings["protect"]
-                )
-            else:
-                await bot.send_message(
-                    channel_id, 
-                    full_text,
-                    disable_notification=settings["silent"],
-                    protect_content=settings["protect"],
-                    disable_web_page_preview=settings["disable_preview"]
-                )
-            
-            user_data[uid]["stats"]["posts"] += 1
-            
+                raise Exception("Нет прав")
+        except:
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📝 Новый пост", callback_data="create_post")],
-                [InlineKeyboardButton(text="← Главное меню", callback_data="back_main")]
+                [InlineKeyboardButton(text="← Назад", callback_data="schedule_choice")]
             ])
-            
-            await message.answer(
-                f"✅ Пост опубликован в {chat.title}!\n\n"
-                f"📊 Всего опубликовано: {user_data[uid]['stats']['posts']}",
-                reply_markup=kb
-            )
-            await state.clear()
-            
-        except TelegramAPIError as e:
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="publish_now")],
-                [InlineKeyboardButton(text="← Назад", callback_data="back_main")]
-            ])
-            await message.answer(f"❌ Ошибка: {e}\n\nПроверьте ID канала и права бота.", reply_markup=kb)
+            await message.answer("❌ Неверный канал или нет прав!", reply_markup=kb)
+            return
+        
+        post_id = str(uuid.uuid4())[:8]
+        scheduled_posts.append((
+            dt, uid, channel_id, full_text, photo_id, post_id,
+            settings["silent"], settings["protect"], settings["disable_preview"]
+        ))
+        
+        user_data[uid]["stats"]["scheduled_active"] += 1
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📅 К запланированным", callback_data="scheduled")],
+            [InlineKeyboardButton(text="← Главное меню", callback_data="back_main")]
+        ])
+        
+        await message.answer(
+            f"✅ Пост запланирован!\n\n"
+            f"📅 Дата: <b>{dt.strftime('%d.%m.%Y %H:%M')}</b>\n"
+            f"📢 Канал: <b>{chat.title}</b>\n"
+            f"🆔 ID: <code>{post_id}</code>",
+            reply_markup=kb
+        )
+        await state.clear()
+        
+    except ValueError:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="← Назад", callback_data="schedule_choice")]
+        ])
+        await message.answer("❌ Неверный формат!\n\nИспользуй: <code>ДД.ММ.ГГГГ ЧЧ:ММ @channel</code>", reply_markup=kb)
+
+# ====================== НАЗАД К ПРЕДПРОСМОТРУ ======================
+@router.callback_query(F.data == "back_to_preview")
+async def back_to_preview(callback: CallbackQuery, state: FSMContext):
+    """Возврат к экрану предпросмотра с выбором"""
+    await show_preview_with_choice(callback.message, state)
+    await callback.answer()
 
 # ====================== ЗАПЛАНИРОВАННЫЕ ПОСТЫ ======================
 @router.callback_query(F.data == "scheduled")
@@ -841,8 +919,8 @@ async def show_info(callback: CallbackQuery):
             f"• Выберите картинку (или без неё)\n"
             f"• Бот автоматически добавит ваши блоки\n\n"
             f"<b>3. Публикация</b>\n"
-            f"• Предпросмотр перед публикацией\n"
-            f"• Мгновенная публикация или отложенный пост\n"
+            f"• <b>Опубликовать сейчас</b> — мгновенно в канал\n"
+            f"• <b>Запланировать</b> — отложенная публикация\n"
             f"• Настройки: беззвучный режим, защита контента\n\n"
             f"<b>💡 Совет:</b> Используйте реферальную программу — "
             f"получайте +1 день за каждого приглашённого друга!")
