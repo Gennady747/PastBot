@@ -1,5 +1,8 @@
+# bot.py — можно заливать на GitHub
 from aiogram import Bot, Dispatcher, Router, F
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice, InputMediaPhoto
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -7,19 +10,26 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from datetime import datetime, timedelta
 import asyncio
 import logging
-import random
 
-# ====================== ТОКЕН ======================
+# ====================== ЗАГРУЗКА ТОКЕНА ИЗ .env ======================
 from dotenv import load_dotenv
 import os
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+
 if not BOT_TOKEN:
-    print("❌ BOT_TOKEN не найден в .env!")
+    print("❌ Ошибка: BOT_TOKEN не найден в файле .env!")
+    print("Создай файл .env рядом с bot.py и добавь туда:")
+    print("BOT_TOKEN=123456:AAFxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
     exit(1)
 
-bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
+# ====================== ИСПРАВЛЕННЫЙ BOT (aiogram 3.7+) ======================
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
+
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 router = Router()
@@ -31,22 +41,21 @@ class BlockSetup(StatesGroup):
 
 class PostCreation(StatesGroup):
     waiting_main_text = State()
-    waiting_media = State()
-    waiting_schedule = State()
 
 class GalleryUpload(StatesGroup):
     waiting_photo = State()
 
 # ====================== ДАННЫЕ ======================
-user_data = {}          # основные данные пользователя
-scheduled_posts = []    # список отложенных постов: (publish_time, user_id, chat_id, text, media_id, blocks)
+user_data = {}          # uid → настройки пользователя
+scheduled_posts = []    # список запланированных постов
 
+# ====================== ГЛАВНОЕ МЕНЮ ======================
 def main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👤 Мой профиль", callback_data="profile"),
          InlineKeyboardButton(text="⭐ Подписка", callback_data="subscription")],
         [InlineKeyboardButton(text="📋 Настройка блоков", callback_data="blocks_menu"),
-         InlineKeyboardButton(text="🖼 Галерея", callback_data="gallery")],
+         InlineKeyboardButton(text="🖼 Галерея картинок", callback_data="gallery")],
         [InlineKeyboardButton(text="📝 Создать пост", callback_data="create_post"),
          InlineKeyboardButton(text="📅 Запланированные посты", callback_data="scheduled")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="stats"),
@@ -61,18 +70,19 @@ async def scheduler():
     while True:
         now = datetime.now()
         for task in scheduled_posts[:]:
-            if task[0] <= now:
-                publish_time, uid, channel, text, media_id, blocks = task
+            publish_time, uid, channel_id, text, photo_id = task
+            if publish_time <= now:
                 try:
-                    if media_id:
-                        await bot.send_photo(channel, media_id, caption=text, parse_mode="HTML")
+                    if photo_id:
+                        await bot.send_photo(channel_id, photo_id, caption=text, parse_mode=ParseMode.HTML)
                     else:
-                        await bot.send_message(channel, text, parse_mode="HTML")
+                        await bot.send_message(channel_id, text, parse_mode=ParseMode.HTML)
                     scheduled_posts.remove(task)
-                    user_data[uid]["stats"]["posts"] += 1
+                    if uid in user_data:
+                        user_data[uid]["stats"]["posts"] += 1
                 except Exception as e:
-                    print(f"Ошибка публикации: {e}")
-        await asyncio.sleep(30)  # проверяем каждые 30 секунд
+                    logging.error(f"Ошибка публикации: {e}")
+        await asyncio.sleep(30)
 
 # ====================== СТАРТ ======================
 @router.message(Command("start"))
@@ -84,49 +94,97 @@ async def cmd_start(message: Message, state: FSMContext):
             "subscription_until": None,
             "channels": [],
             "blocks": {},
-            "gallery": [],          # список file_id фотографий
+            "gallery": [],                    # список file_id фото
             "settings": {"silent": False, "protect": False, "disable_preview": True, "auto_pin": False},
             "stats": {"posts": 0},
             "referrals": 0
         }
 
     await message.answer(
-        "👋 <b>Content Formatter Bot</b>\n\n"
-        "Я полностью автоматизирую оформление и публикацию постов в твои каналы.\n\n"
-        "Что ты можешь делать:\n"
-        "• Настраивать 4 постоянных блока (хэштеги, ссылки, цитаты и т.д.)\n"
-        "• Создавать галерею картинок и использовать их в постах (или рандомно)\n"
-        "• Публиковать посты сразу или запланировать на любое время\n"
-        "• Получать красивый предпросмотр перед публикацией\n\n"
-        "Добавь меня администратором в канал и начинай!",
+        "👋 <b>Добро пожаловать в Content Formatter Bot!</b>\n\n"
+        "Я помогаю авторам Telegram-каналов быстро и красиво оформлять посты.\n\n"
+        "Что я умею:\n"
+        "• Настраивать 4 постоянных блока (хэштеги, ссылки, текст, цитаты)\n"
+        "• Хранить галерею твоих картинок\n"
+        "• Создавать посты с автоматическим добавлением блоков\n"
+        "• Публиковать сразу или запланировать на будущее\n"
+        "• Показывать точный предпросмотр\n\n"
+        "Добавь меня администратором в канал с правом отправки сообщений.\n\n"
+        "Выбирай нужный раздел ниже 👇",
         reply_markup=main_menu()
     )
     await state.clear()
 
+# ====================== ПРОФИЛЬ ======================
+@router.callback_query(F.data == "profile")
+async def show_profile(callback: CallbackQuery):
+    uid = callback.from_user.id
+    data = user_data.get(uid, {})
+    now = datetime.now()
+
+    if data.get("subscription_until") and data["subscription_until"] > now:
+        status = f"✅ Подписка активна до {data['subscription_until'].strftime('%d.%m.%Y')}"
+    elif data.get("trial_until") and data["trial_until"] > now:
+        days = (data["trial_until"] - now).days
+        status = f"🕒 Пробный период — {days} дней"
+    else:
+        status = "❌ Подписка неактивна"
+
+    channels = "\n".join(f"• {ch}" for ch in data.get("channels", [])) or "Нет подключённых каналов"
+
+    text = (f"👤 <b>Мой профиль</b>\n\n"
+            f"Имя: <b>{callback.from_user.full_name}</b>\n"
+            f"Подписка: {status}\n\n"
+            f"<b>Каналы:</b>\n{channels}\n\n"
+            f"Опубликовано постов: <b>{data['stats']['posts']}</b>")
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="refresh_profile")],
+        [InlineKeyboardButton(text="← Главное меню", callback_data="back_main")]
+    ])
+
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+@router.callback_query(F.data == "refresh_profile")
+async def refresh_profile(callback: CallbackQuery):
+    await callback.answer("✅ Информация обновлена")
+    await show_profile(callback)
+
+# ====================== НАСТРОЙКА БЛОКОВ ======================
+@router.callback_query(F.data == "blocks_menu")
+async def blocks_menu(callback: CallbackQuery):
+    text = ("📋 <b>Настройка блоков поста</b>\n\n"
+            "Здесь ты настраиваешь 4 блока, которые будут автоматически добавляться к каждому посту.\n\n"
+            "• Блок 1 — после основного текста\n"
+            "• Блок 2 и 3 — в середине\n"
+            "• Блок 4 — обычно в конце (хэштеги, ссылки)")
+    
+    kb = []
+    for i in range(1, 5):
+        b = user_data[callback.from_user.id].get("blocks", {}).get(str(i), {})
+        status = b.get("type", "пусто")
+        kb.append([InlineKeyboardButton(text=f"Блок {i} — {status}", callback_data=f"edit_block_{i}")])
+    
+    kb.append([InlineKeyboardButton(text="✅ Сохранить блоки", callback_data="save_blocks")])
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    await callback.answer()
+
 # ====================== ГАЛЕРЕЯ ======================
 @router.callback_query(F.data == "gallery")
 async def show_gallery(callback: CallbackQuery):
-    uid = callback.from_user.id
-    gallery = user_data[uid]["gallery"]
-    count = len(gallery)
-    text = (f"🖼 <b>Твоя галерея</b>\n\n"
-            f"В галерее сейчас <b>{count}</b> фото.\n\n"
-            "Что хочешь сделать?\n"
-            "• Загрузить новые фото\n"
-            "• Посмотреть все фото\n"
-            "• Очистить галерею")
+    count = len(user_data[callback.from_user.id]["gallery"])
+    text = f"🖼 <b>Галерея картинок</b>\n\nВ галерее: <b>{count}</b> фото\n\nЗагружай фото, которые хочешь использовать в постах."
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📤 Загрузить фото", callback_data="upload_photo")],
-        [InlineKeyboardButton(text="👁 Посмотреть галерею", callback_data="view_gallery")],
-        [InlineKeyboardButton(text="🗑 Очистить галерею", callback_data="clear_gallery")],
-        [InlineKeyboardButton(text="← Главное меню", callback_data="back_main")]
+        [InlineKeyboardButton(text="← Назад", callback_data="back_main")]
     ])
     await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer()
 
 @router.callback_query(F.data == "upload_photo")
-async def upload_photo(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("📤 Отправь мне фото (можно несколько подряд). Когда закончишь — нажми /done")
+async def start_upload(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("📤 Отправь мне фото (можно несколько). Когда закончишь — напиши /done")
     await state.set_state(GalleryUpload.waiting_photo)
     await callback.answer()
 
@@ -135,59 +193,56 @@ async def receive_photo(message: Message, state: FSMContext):
     if message.photo:
         file_id = message.photo[-1].file_id
         user_data[message.from_user.id]["gallery"].append(file_id)
-        await message.answer(f"✅ Фото добавлено в галерею ({len(user_data[message.from_user.id]['gallery'])} шт.)")
+        await message.answer(f"✅ Фото добавлено! Всего: {len(user_data[message.from_user.id]['gallery'])}")
     else:
-        await message.answer("Это не фото. Отправь фото.")
+        await message.answer("Отправь фото.")
 
 @router.message(Command("done"))
-async def done_gallery(message: Message, state: FSMContext):
+async def done_upload(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("✅ Галерея обновлена!", reply_markup=main_menu())
 
-# ====================== СОЗДАНИЕ ПОСТА (с галереей и планированием) ======================
+# ====================== СОЗДАНИЕ ПОСТА ======================
 @router.callback_query(F.data == "create_post")
 async def create_post(callback: CallbackQuery, state: FSMContext):
-    text = ("📝 <b>Создание поста</b>\n\n"
-            "1. Отправь основной текст поста\n"
-            "2. Я предложу выбрать картинку из галереи или загрузить новую\n"
-            "3. Добавлю твои блоки (хэштеги, ссылки, цитаты)\n"
-            "4. Покажу предпросмотр\n"
-            "5. Ты сможешь опубликовать сразу или запланировать\n\n"
-            "Отправь основной текст поста:")
-    await callback.message.edit_text(text)
+    await callback.message.edit_text(
+        "📝 <b>Создание поста</b>\n\nОтправь основной текст поста:",
+        reply_markup=None
+    )
     await state.set_state(PostCreation.waiting_main_text)
     await callback.answer()
 
 @router.message(PostCreation.waiting_main_text)
 async def get_main_text(message: Message, state: FSMContext):
     await state.update_data(main_text=message.text)
-    uid = message.from_user.id
-    gallery_size = len(user_data[uid]["gallery"])
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🖼 Выбрать из галереи", callback_data="use_gallery")],
-        [InlineKeyboardButton(text="🎲 Рандом из галереи", callback_data="random_gallery")],
-        [InlineKeyboardButton(text="📤 Загрузить новое фото", callback_data="upload_new")],
-        [InlineKeyboardButton(text="Без картинки", callback_data="no_photo")]
-    ])
-    
-    await message.answer(f"Отлично! Выбери картинку для поста.\nВ твоей галерее сейчас {gallery_size} фото.", reply_markup=kb)
-    await state.set_state(PostCreation.waiting_media)
+    await message.answer("Текст сохранён.\n\nТеперь выбери картинку или нажми /skip")
+    # Здесь можно добавить выбор из галереи — пока упрощённо
 
-# (дальше обработчики use_gallery, random_gallery и т.д. можно расширить — я оставил место)
+# ====================== ОСТАЛЬНЫЕ РАЗДЕЛЫ ======================
+@router.callback_query(F.data.in_(["subscription", "stats", "referral", "settings", "info", "support", "scheduled"]))
+async def other_sections(callback: CallbackQuery):
+    texts = {
+        "subscription": "⭐ Здесь будет оплата через Telegram Stars",
+        "stats": "📊 Статистика публикаций",
+        "referral": "👥 Партнёрская программа — скоро",
+        "settings": "⚙️ Настройки публикации",
+        "info": "ℹ️ Подробная инструкция, как пользоваться ботом",
+        "support": "🆘 Напиши @твой_юзернейм",
+        "scheduled": "📅 Запланированные посты"
+    }
+    await callback.message.edit_text(texts.get(callback.data, "Раздел в разработке"), reply_markup=main_menu())
+    await callback.answer()
 
-# ====================== ПЛАНИРОВАНИЕ ======================
-# После предпросмотра будет кнопка «Запланировать»
-
-@router.callback_query(F.data == "scheduled")
-async def show_scheduled(callback: CallbackQuery):
-    await callback.answer("Пока здесь будут показаны все запланированные посты (в разработке)", show_alert=True)
+@router.callback_query(F.data == "back_main")
+async def back_main(callback: CallbackQuery):
+    await callback.message.edit_text("Главное меню", reply_markup=main_menu())
 
 # ====================== ЗАПУСК ======================
 async def main():
-    asyncio.create_task(scheduler())   # запускаем планировщик
+    asyncio.create_task(scheduler())
     logging.basicConfig(level=logging.INFO)
-    print("🚀 Полноценный бот с галереей и планированием запущен!")
+    print("🚀 Бот успешно запущен на boothost.ru")
+    print("Токен загружен из .env файла")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
