@@ -1,4 +1,4 @@
-# bot.py — Исправлена оплата (убрана прокладка, добавлена отмена)
+# bot.py — Полная исправленная версия
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -16,6 +16,7 @@ import asyncio
 import logging
 import os
 import uuid
+import random
 
 # ====================== ТОКЕН ======================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -43,7 +44,8 @@ class BlockSetup(StatesGroup):
 
 class PostCreation(StatesGroup):
     waiting_main_text = State()
-    waiting_media = State()
+    waiting_media_choice = State()
+    waiting_gallery_select = State()
     waiting_publish_choice = State()
     waiting_channel_now = State()
     waiting_schedule_time = State()
@@ -68,11 +70,6 @@ def main_menu():
         [InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings"),
          InlineKeyboardButton(text="ℹ️ Как это работает", callback_data="info")],
         [InlineKeyboardButton(text="🆘 Поддержка", callback_data="support")]
-    ])
-
-def back_button(callback_data="back_main"):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="← Назад", callback_data=callback_data)]
     ])
 
 # ====================== ДАННЫЕ ======================
@@ -131,13 +128,6 @@ async def check_subscription(uid: int) -> bool:
         return True
     return False
 
-# ====================== ОБРАБОТЧИК ОТМЕНЫ ======================
-@router.callback_query(F.data == "cancel_fsm")
-async def cancel_fsm(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await callback.message.edit_text("❌ Отменено. Главное меню:", reply_markup=main_menu())
-    await callback.answer()
-
 # ====================== СТАРТ ======================
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext, command: Command = None):
@@ -175,8 +165,7 @@ async def cmd_start(message: Message, state: FSMContext, command: Command = None
     await message.answer(
         "👋 <b>Content Formatter Bot</b>\n\n"
         "Помогаю быстро и красиво оформлять посты для Telegram-каналов.\n\n"
-        "🎁 <b>Первые 5 дней бесплатно!</b>\n\n"
-        "Добавь меня администратором в канал с правом публикации сообщений.",
+        "🎁 <b>Первые 5 дней бесплатно!</b>",
         reply_markup=main_menu()
     )
     await state.clear()
@@ -201,18 +190,18 @@ async def show_profile(callback: CallbackQuery):
             f"Username: @{data.get('username', callback.from_user.username or 'Нет')}\n"
             f"ID: <code>{uid}</code>\n\n"
             f"⭐ Подписка: {status}\n"
-            f"📝 Опубликовано постов: <b>{data['stats']['posts']}</b>\n"
-            f"📅 Запланировано постов: <b>{data['stats']['scheduled_active']}</b>\n"
-            f"👥 Приглашено друзей: <b>{data['referrals']}</b>")
+            f"📝 Опубликовано: <b>{data['stats']['posts']}</b>\n"
+            f"📅 Запланировано: <b>{data['stats']['scheduled_active']}</b>\n"
+            f"👥 Рефералов: <b>{data['referrals']}</b>")
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Обновить информацию", callback_data="profile")],
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="profile")],
         [InlineKeyboardButton(text="← Назад", callback_data="back_main")]
     ])
     await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer()
 
-# ====================== ПОДПИСКА (ИСПРАВЛЕНО) ======================
+# ====================== ПОДПИСКА ======================
 @router.callback_query(F.data == "subscription")
 async def subscription_menu(callback: CallbackQuery):
     uid = callback.from_user.id
@@ -221,14 +210,16 @@ async def subscription_menu(callback: CallbackQuery):
     
     current_status = ""
     if data.get("subscription_until") and data["subscription_until"] > now:
-        current_status = f"\n✅ Активна до: {data['subscription_until'].strftime('%d.%m.%Y')}\n"
+        current_status = f"\n✅ До: {data['subscription_until'].strftime('%d.%m.%Y')}\n"
     elif data.get("trial_until") and data["trial_until"] > now:
         days = (data["trial_until"] - now).days
-        current_status = f"\n🕒 Пробный период: {days} дней\n"
+        current_status = f"\n🕒 Пробный: {days} дней\n"
 
     text = (f"⭐ <b>Подписка через Telegram Stars</b>{current_status}\n"
-            f"Выберите период подписки:\n\n"
-            f"💡 Приглашай друзей и получай +1 день за каждого!")
+            f"1 неделя — 100 ⭐\n"
+            f"2 недели — 200 ⭐\n"
+            f"3 недели — 300 ⭐\n"
+            f"1 месяц — 350 ⭐")
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="1 неделя — 100 ⭐", callback_data="buy_7_100")],
@@ -242,7 +233,6 @@ async def subscription_menu(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("buy_"))
 async def buy_subscription(callback: CallbackQuery):
-    """Сразу отправляем инвойс без прокладки + кнопка отмены отдельным сообщением"""
     try:
         parts = callback.data.split("_")
         days = int(parts[1])
@@ -251,34 +241,26 @@ async def buy_subscription(callback: CallbackQuery):
         await callback.answer("❌ Ошибка!", show_alert=True)
         return
 
-    # Отправляем инвойс сразу
     await bot.send_invoice(
         chat_id=callback.from_user.id,
         title=f"Подписка на {days} дней",
-        description=f"Полный доступ к функциям бота\nПериод: {days} дней",
+        description=f"Полный доступ к функциям бота",
         payload=f"sub_{days}",
-        provider_token="",  # Для Stars оставляем пустым
+        provider_token="",
         currency="XTR",
         prices=[LabeledPrice(label=f"{days} дней", amount=stars)]
     )
     
-    # Отправляем кнопку отмены ОТДЕЛЬНЫМ сообщением (под инвойсом)
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❌ Отменить оплату", callback_data="cancel_payment")]
     ])
-    await callback.message.answer(
-        "👆 Нажмите «Заплатить» выше для оплаты\n"
-        "Или «Отменить» если передумали:",
-        reply_markup=kb
-    )
-    
+    await callback.message.answer("👆 Нажмите «Заплатить» или «Отменить»:", reply_markup=kb)
     await callback.answer()
 
 @router.callback_query(F.data == "cancel_payment")
 async def cancel_payment(callback: CallbackQuery):
-    """Удаляем сообщение с кнопкой отмены и возвращаем в меню подписки"""
-    await callback.message.delete()  # Удаляем сообщение с "Отменить оплату"
-    await subscription_menu(callback)  # Возвращаем в меню выбора тарифа
+    await callback.message.delete()
+    await subscription_menu(callback)
 
 @router.pre_checkout_query()
 async def pre_checkout(pre_checkout_query):
@@ -301,8 +283,7 @@ async def successful_payment(message: Message):
         user_data[uid]["subscription_until"] = now + timedelta(days=days)
     
     await message.answer(
-        f"🎉 Подписка успешно активирована на {days} дней!\n"
-        f"Действует до: {user_data[uid]['subscription_until'].strftime('%d.%m.%Y')}",
+        f"🎉 Подписка активирована на {days} дней!",
         reply_markup=main_menu()
     )
 
@@ -310,12 +291,10 @@ async def successful_payment(message: Message):
 @router.callback_query(F.data == "blocks_menu")
 async def blocks_menu(callback: CallbackQuery):
     if not await check_subscription(callback.from_user.id):
-        await callback.answer("❌ Требуется активная подписка!", show_alert=True)
+        await callback.answer("❌ Требуется подписка!", show_alert=True)
         return
         
-    text = ("📋 <b>Настройка 4 блоков</b>\n\n"
-            "Нажми на блок, чтобы настроить его содержимое.\n"
-            "Бот автоматически добавит эти блоки к каждому посту.")
+    text = "📋 <b>Настройка 4 блоков</b>\n\nНажми на блок для настройки:"
     
     kb = []
     for i in range(1, 5):
@@ -335,13 +314,7 @@ async def edit_block(callback: CallbackQuery, state: FSMContext):
     
     current = user_data[callback.from_user.id].get("blocks", {}).get(str(block_num), {}).get("content", "")
     
-    text = (f"✏️ <b>Настройка Блока {block_num}</b>\n\n"
-            f"Текущее содержимое:\n<code>{current or 'пусто'}</code>\n\n"
-            f"Отправь новый текст для блока:\n"
-            f"• Обычный текст\n"
-            f"• Хэштеги (#тег)\n"
-            f"• Ссылки (https://...)\n"
-            f"• Цитаты (используй HTML &lt;blockquote&gt;)")
+    text = f"✏️ <b>Блок {block_num}</b>\n\nТекущее:\n<code>{current or 'пусто'}</code>\n\nОтправь новый текст:"
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❌ Отмена", callback_data="blocks_menu")]
@@ -363,7 +336,7 @@ async def save_block(message: Message, state: FSMContext):
     user_data[uid]["blocks"][str(block_num)] = {"content": message.text}
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="← К списку блоков", callback_data="blocks_menu")]
+        [InlineKeyboardButton(text="← К блокам", callback_data="blocks_menu")]
     ])
     await message.answer(f"✅ Блок {block_num} сохранён!", reply_markup=kb)
     await state.clear()
@@ -372,20 +345,15 @@ async def save_block(message: Message, state: FSMContext):
 @router.callback_query(F.data == "gallery")
 async def gallery_menu(callback: CallbackQuery):
     if not await check_subscription(callback.from_user.id):
-        await callback.answer("❌ Требуется активная подписка!", show_alert=True)
+        await callback.answer("❌ Требуется подписка!", show_alert=True)
         return
         
     count = len(user_data[callback.from_user.id]["gallery"])
-    text = (f"🖼 <b>Галерея картинок</b>\n\n"
-            f"Фото в галерее: <b>{count}</b>\n\n"
-            f"При создании поста можно выбрать:\n"
-            f"• Конкретное фото\n"
-            f"• Случайное фото\n"
-            f"• Без фото")
+    text = f"🖼 <b>Галерея</b>\n\nФото: <b>{count}</b>"
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📤 Загрузить фото", callback_data="upload_photo")],
-        [InlineKeyboardButton(text="🗑 Очистить галерею", callback_data="clear_gallery")],
+        [InlineKeyboardButton(text="📤 Загрузить", callback_data="upload_photo")],
+        [InlineKeyboardButton(text="🗑 Очистить", callback_data="clear_gallery")],
         [InlineKeyboardButton(text="← Назад", callback_data="back_main")]
     ])
     await callback.message.edit_text(text, reply_markup=kb)
@@ -396,9 +364,7 @@ async def upload_photo(callback: CallbackQuery, state: FSMContext):
         [InlineKeyboardButton(text="❌ Отмена", callback_data="gallery")]
     ])
     await callback.message.edit_text(
-        "📤 Отправь мне фото.\n"
-        "Можно отправить несколько фото подряд.\n"
-        "Когда закончишь — напиши /done",
+        "📤 Отправь фото. Можно несколько.\nКогда закончишь — /done",
         reply_markup=kb
     )
     await state.set_state(GalleryUpload.waiting_photo)
@@ -415,17 +381,17 @@ async def receive_photo(message: Message, state: FSMContext):
             [InlineKeyboardButton(text="✅ Готово", callback_data="gallery")],
             [InlineKeyboardButton(text="❌ Отмена", callback_data="gallery")]
         ])
-        await message.answer(f"✅ Фото добавлено! Всего: {count}\n\nОтправь ещё или нажми «Готово»", reply_markup=kb)
+        await message.answer(f"✅ Добавлено! Всего: {count}", reply_markup=kb)
     else:
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="❌ Отмена", callback_data="gallery")]
         ])
-        await message.answer("❌ Это не фото. Отправь изображение или отмени:", reply_markup=kb)
+        await message.answer("❌ Это не фото.", reply_markup=kb)
 
 @router.callback_query(F.data == "clear_gallery")
 async def clear_gallery(callback: CallbackQuery):
     user_data[callback.from_user.id]["gallery"] = []
-    await callback.answer("🗑 Галерея очищена!", show_alert=True)
+    await callback.answer("🗑 Очищено!", show_alert=True)
     await gallery_menu(callback)
 
 @router.message(Command("done"))
@@ -437,20 +403,19 @@ async def done_gallery(message: Message, state: FSMContext):
 @router.callback_query(F.data == "create_post")
 async def create_post(callback: CallbackQuery, state: FSMContext):
     if not await check_subscription(callback.from_user.id):
-        await callback.answer("❌ Требуется активная подписка!", show_alert=True)
+        await callback.answer("❌ Требуется подписка!", show_alert=True)
         return
+    
+    await state.set_state(PostCreation.waiting_main_text)
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❌ Отмена", callback_data="back_main")]
     ])
     
     await callback.message.edit_text(
-        "📝 <b>Создание поста</b>\n\n"
-        "Шаг 1/4: Отправь основной текст поста:\n"
-        "(поддерживается HTML-разметка)",
+        "📝 <b>Создание поста</b>\n\nШаг 1/4: Отправь текст поста:",
         reply_markup=kb
     )
-    await state.set_state(PostCreation.waiting_main_text)
     await callback.answer()
 
 @router.message(PostCreation.waiting_main_text)
@@ -458,6 +423,8 @@ async def get_main_text(message: Message, state: FSMContext):
     await state.update_data(main_text=message.text)
     uid = message.from_user.id
     count = len(user_data[uid]["gallery"])
+    
+    await state.set_state(PostCreation.waiting_media_choice)
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🖼 Выбрать из галереи", callback_data="choose_gallery")],
@@ -467,20 +434,62 @@ async def get_main_text(message: Message, state: FSMContext):
     ])
     
     await message.answer(
-        f"✅ Текст сохранён ({len(message.text)} символов).\n\n"
-        f"Шаг 2/4: Добавить картинку?\n"
-        f"В галерее {count} фото.",
+        f"✅ Текст сохранён ({len(message.text)} симв.)\n\n"
+        f"Шаг 2/4: Картинка? (в галерее {count} фото)",
         reply_markup=kb
     )
-    await state.set_state(PostCreation.waiting_media)
 
-@router.callback_query(F.data.in_(["choose_gallery", "random_gallery", "no_image"]))
-async def choose_image(callback: CallbackQuery, state: FSMContext):
+# ====================== ВЫБОР МЕДИА (ИСПРАВЛЕНО) ======================
+@router.callback_query(F.data == "choose_gallery")
+async def choose_from_gallery(callback: CallbackQuery, state: FSMContext):
     uid = callback.from_user.id
+    gallery = user_data[uid]["gallery"]
+    
+    if not gallery:
+        await callback.answer("❌ Галерея пуста!", show_alert=True)
+        return
+    
     data = await state.get_data()
     main_text = data["main_text"]
     
-    # Собираем блоки
+    blocks_text = ""
+    for i in range(1, 5):
+        block = user_data[uid].get("blocks", {}).get(str(i), {})
+        if block.get("content"):
+            blocks_text += f"\n\n{block['content']}"
+    
+    full_text = main_text + blocks_text
+    await state.update_data(full_text=full_text, available_photos=gallery[:5])
+    await state.set_state(PostCreation.waiting_gallery_select)
+    
+    await callback.message.edit_text("🖼 Выбери фото:")
+    
+    for idx, photo_id in enumerate(gallery[:5]):
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"✅ Выбрать {idx+1}", callback_data=f"pick_photo_{idx}")]
+        ])
+        await callback.message.answer_photo(photo_id, reply_markup=kb)
+    
+    kb_cancel = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="← Назад", callback_data="back_to_media")]
+    ])
+    await callback.message.answer("Или:", reply_markup=kb_cancel)
+    await callback.answer()
+
+@router.callback_query(F.data == "random_gallery")
+async def choose_random(callback: CallbackQuery, state: FSMContext):
+    uid = callback.from_user.id
+    gallery = user_data[uid]["gallery"]
+    
+    if not gallery:
+        await callback.answer("❌ Галерея пуста!", show_alert=True)
+        return
+    
+    photo_id = random.choice(gallery)
+    
+    data = await state.get_data()
+    main_text = data["main_text"]
+    
     blocks_text = ""
     for i in range(1, 5):
         block = user_data[uid].get("blocks", {}).get(str(i), {})
@@ -490,117 +499,113 @@ async def choose_image(callback: CallbackQuery, state: FSMContext):
     
     full_text = main_text + blocks_text
     
-    if callback.data == "choose_gallery":
-        gallery = user_data[uid]["gallery"]
-        if not gallery:
-            kb = back_button("create_post")
-            await callback.message.edit_text("❌ Галерея пуста! Сначала загрузите фото.", reply_markup=kb)
-            return
-        
-        await callback.message.edit_text("🖼 Выбери фото из галереи (отправлены ниже):")
-        
-        for idx, photo_id in enumerate(gallery[:5]):
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=f"✅ Выбрать это фото", callback_data=f"select_photo_{idx}")],
-                [InlineKeyboardButton(text="❌ Отмена", callback_data="back_main")]
-            ])
-            await callback.message.answer_photo(photo_id, reply_markup=kb)
-        
-        await state.update_data(full_text=full_text, available_photos=gallery[:5])
-        
-    elif callback.data == "random_gallery":
-        import random
-        gallery = user_data[uid]["gallery"]
-        if gallery:
-            photo_id = random.choice(gallery)
-            await state.update_data(photo_id=photo_id, full_text=full_text)
-            await show_preview_with_choice(callback.message, state)
-        else:
-            kb = back_button("create_post")
-            await callback.message.edit_text("❌ Галерея пуста!", reply_markup=kb)
-            return
-            
-    else:  # no_image
-        await state.update_data(photo_id=None, full_text=full_text)
-        await show_preview_with_choice(callback.message, state, edit=False)
-        return
+    await state.update_data(photo_id=photo_id, full_text=full_text)
+    await state.set_state(PostCreation.waiting_publish_choice)
     
+    await show_preview(callback.message, state)
     await callback.answer()
 
-@router.callback_query(F.data.startswith("select_photo_"))
-async def select_specific_photo(callback: CallbackQuery, state: FSMContext):
+@router.callback_query(F.data == "no_image")
+async def choose_no_image(callback: CallbackQuery, state: FSMContext):
+    uid = callback.from_user.id
+    
+    data = await state.get_data()
+    main_text = data["main_text"]
+    
+    blocks_text = ""
+    for i in range(1, 5):
+        block = user_data[uid].get("blocks", {}).get(str(i), {})
+        if block.get("content"):
+            blocks_text += f"\n\n{block['content']}"
+            user_data[uid]["stats"]["blocks_used"][str(i)] += 1
+    
+    full_text = main_text + blocks_text
+    
+    await state.update_data(photo_id=None, full_text=full_text)
+    await state.set_state(PostCreation.waiting_publish_choice)
+    
+    await show_preview(callback.message, state)
+    await callback.answer()
+
+@router.callback_query(F.data == "back_to_media")
+async def back_to_media(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(PostCreation.waiting_media_choice)
+    uid = callback.from_user.id
+    count = len(user_data[uid]["gallery"])
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🖼 Выбрать из галереи", callback_data="choose_gallery")],
+        [InlineKeyboardButton(text="🎲 Случайное фото", callback_data="random_gallery")],
+        [InlineKeyboardButton(text="🚫 Без картинки", callback_data="no_image")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="back_main")]
+    ])
+    
+    await callback.message.edit_text(
+        f"Шаг 2/4: Картинка? (в галерее {count} фото)",
+        reply_markup=kb
+    )
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("pick_photo_"))
+async def pick_photo(callback: CallbackQuery, state: FSMContext):
     idx = int(callback.data.split("_")[-1])
     data = await state.get_data()
     photos = data["available_photos"]
     
     await state.update_data(photo_id=photos[idx])
-    await show_preview_with_choice(callback.message, state)
+    await state.set_state(PostCreation.waiting_publish_choice)
+    
+    await show_preview(callback.message, state)
+    await callback.answer()
 
-# ====================== ПРЕДПРОСМОТР С ВЫБОРОМ ======================
-async def show_preview_with_choice(message: Message, state: FSMContext, edit=True):
+# ====================== ПРЕДПРОСМОТР ======================
+async def show_preview(message: Message, state: FSMContext):
     data = await state.get_data()
     full_text = data["full_text"]
     photo_id = data.get("photo_id")
     settings = user_data[message.chat.id]["settings"]
     
-    preview_text = (f"👁 <b>Предпросмотр поста:</b>\n\n"
-                    f"{full_text}\n\n"
-                    f"⚙️ Настройки: "
-                    f"{'🔕 ' if settings['silent'] else '🔔 '}"
-                    f"{'🔒 ' if settings['protect'] else '🔓 '}"
-                    f"{'🔗 ' if settings['disable_preview'] else '🌐 '}\n\n"
-                    f"<b>Выберите действие:</b>")
+    preview_text = (f"👁 <b>Предпросмотр:</b>\n\n"
+                    f"{full_text[:500]}{'...' if len(full_text) > 500 else ''}\n\n"
+                    f"⚙️ {'🔕' if settings['silent'] else '🔔'} "
+                    f"{'🔒' if settings['protect'] else '🔓'} "
+                    f"{'🔗' if settings['disable_preview'] else '🌐'}\n\n"
+                    f"<b>Выберите:</b>")
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📢 ОПУБЛИКОВАТЬ СЕЙЧАС", callback_data="publish_now_choice")],
-        [InlineKeyboardButton(text="📅 ЗАПЛАНИРОВАТЬ", callback_data="schedule_choice")],
-        [InlineKeyboardButton(text="✏️ Изменить текст", callback_data="create_post"),
-         InlineKeyboardButton(text="← Назад", callback_data="back_main")]
+        [InlineKeyboardButton(text="📢 ОПУБЛИКОВАТЬ СЕЙЧАС", callback_data="publish_now")],
+        [InlineKeyboardButton(text="📅 ЗАПЛАНИРОВАТЬ", callback_data="schedule_post")],
+        [InlineKeyboardButton(text="✏️ Изменить", callback_data="create_post")],
+        [InlineKeyboardButton(text="← Назад", callback_data="back_main")]
     ])
     
     if photo_id:
-        if edit and message.photo:
-            await message.edit_caption(caption=preview_text, reply_markup=kb)
-        else:
-            await message.answer_photo(photo_id, caption=preview_text, reply_markup=kb)
+        await message.answer_photo(photo_id, caption=preview_text, reply_markup=kb)
     else:
-        if edit:
-            try:
-                await message.edit_text(preview_text, reply_markup=kb)
-            except:
-                await message.answer(preview_text, reply_markup=kb)
-        else:
-            await message.answer(preview_text, reply_markup=kb)
-    
-    await state.set_state(PostCreation.waiting_publish_choice)
+        await message.answer(preview_text, reply_markup=kb)
 
-# ====================== ОПУБЛИКОВАТЬ СЕЙЧАС ======================
-@router.callback_query(F.data == "publish_now_choice")
-async def publish_now_choice(callback: CallbackQuery, state: FSMContext):
+# ====================== ПУБЛИКАЦИЯ ======================
+@router.callback_query(F.data == "publish_now")
+async def publish_now(callback: CallbackQuery, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="← Назад к выбору", callback_data="back_to_preview")],
+        [InlineKeyboardButton(text="← Назад", callback_data="back_to_preview")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="back_main")]
     ])
     
-    await callback.message.edit_caption(
-        caption="📢 <b>Публикация сейчас</b>\n\n"
-                "Отправь ID канала для публикации:\n"
-                "Например: @mychannel или -1001234567890\n\n"
-                "❗️ Бот должен быть администратором канала!",
-        reply_markup=kb
-    ) if callback.message.photo else await callback.message.edit_text(
-        "📢 <b>Публикация сейчас</b>\n\n"
-        "Отправь ID канала для публикации:\n"
-                "Например: @mychannel или -1001234567890\n\n"
-                "❗️ Бот должен быть администратором канала!",
-        reply_markup=kb
-    )
+    text = ("📢 <b>Публикация сейчас</b>\n\n"
+            "Отправь ID канала:\n"
+            "@channel или -1001234567890")
+    
+    if callback.message.photo:
+        await callback.message.edit_caption(caption=text, reply_markup=kb)
+    else:
+        await callback.message.edit_text(text, reply_markup=kb)
     
     await state.set_state(PostCreation.waiting_channel_now)
     await callback.answer()
 
 @router.message(PostCreation.waiting_channel_now)
-async def process_publish_now(message: Message, state: FSMContext):
+async def process_publish(message: Message, state: FSMContext):
     data = await state.get_data()
     full_text = data["full_text"]
     photo_id = data.get("photo_id")
@@ -614,24 +619,21 @@ async def process_publish_now(message: Message, state: FSMContext):
         
         if not member.can_post_messages:
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="publish_now_choice")],
+                [InlineKeyboardButton(text="🔄 Повторить", callback_data="publish_now")],
                 [InlineKeyboardButton(text="← Назад", callback_data="back_to_preview")]
             ])
-            await message.answer("❌ У бота нет прав на публикацию!\nПроверьте права администратора.", reply_markup=kb)
+            await message.answer("❌ Нет прав на публикацию!", reply_markup=kb)
             return
         
         if photo_id:
             await bot.send_photo(
-                channel_id, 
-                photo_id, 
-                caption=full_text,
+                channel_id, photo_id, caption=full_text,
                 disable_notification=settings["silent"],
                 protect_content=settings["protect"]
             )
         else:
             await bot.send_message(
-                channel_id, 
-                full_text,
+                channel_id, full_text,
                 disable_notification=settings["silent"],
                 protect_content=settings["protect"],
                 disable_web_page_preview=settings["disable_preview"]
@@ -641,48 +643,34 @@ async def process_publish_now(message: Message, state: FSMContext):
         
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📝 Новый пост", callback_data="create_post")],
-            [InlineKeyboardButton(text="← Главное меню", callback_data="back_main")]
+            [InlineKeyboardButton(text="← Меню", callback_data="back_main")]
         ])
         
-        await message.answer(
-            f"✅ Пост опубликован в канал <b>{chat.title}</b>!\n\n"
-            f"📊 Всего опубликовано: {user_data[uid]['stats']['posts']}",
-            reply_markup=kb
-        )
+        await message.answer(f"✅ Опубликовано в {chat.title}!", reply_markup=kb)
         await state.clear()
         
-    except TelegramAPIError as e:
+    except Exception as e:
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="publish_now_choice")],
+            [InlineKeyboardButton(text="🔄 Повторить", callback_data="publish_now")],
             [InlineKeyboardButton(text="← Назад", callback_data="back_to_preview")]
         ])
-        await message.answer(f"❌ Ошибка: {e}\n\nПроверьте ID канала и права бота.", reply_markup=kb)
+        await message.answer(f"❌ Ошибка: {e}", reply_markup=kb)
 
-# ====================== ЗАПЛАНИРОВАТЬ ======================
-@router.callback_query(F.data == "schedule_choice")
-async def schedule_choice(callback: CallbackQuery, state: FSMContext):
+@router.callback_query(F.data == "schedule_post")
+async def schedule_post(callback: CallbackQuery, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="← Назад к выбору", callback_data="back_to_preview")],
+        [InlineKeyboardButton(text="← Назад", callback_data="back_to_preview")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="back_main")]
     ])
     
-    await callback.message.edit_caption(
-        caption="📅 <b>Запланировать пост</b>\n\n"
-                "Отправь дату и время в формате:\n"
-                "<code>ДД.ММ.ГГГГ ЧЧ:ММ</code>\n"
-                "Например: <code>15.04.2026 14:30</code>\n\n"
-                "Также отправь ID канала через пробел:\n"
-                "<code>ДД.ММ.ГГГГ ЧЧ:ММ @channel</code>",
-        reply_markup=kb
-    ) if callback.message.photo else await callback.message.edit_text(
-        "📅 <b>Запланировать пост</b>\n\n"
-        "Отправь дату и время в формате:\n"
-        "<code>ДД.ММ.ГГГГ ЧЧ:ММ</code>\n"
-        "Например: <code>15.04.2026 14:30</code>\n\n"
-        "Также отправь ID канала через пробел:\n"
-        "<code>ДД.ММ.ГГГГ ЧЧ:ММ @channel</code>",
-        reply_markup=kb
-    )
+    text = ("📅 <b>Запланировать</b>\n\n"
+            "Формат: ДД.ММ.ГГГГ ЧЧ:ММ @channel\n"
+            "Пример: 15.04.2026 14:30 @mychannel")
+    
+    if callback.message.photo:
+        await callback.message.edit_caption(caption=text, reply_markup=kb)
+    else:
+        await callback.message.edit_text(text, reply_markup=kb)
     
     await state.set_state(PostCreation.waiting_schedule_time)
     await callback.answer()
@@ -696,39 +684,20 @@ async def process_schedule(message: Message, state: FSMContext):
     settings = user_data[uid]["settings"]
     
     try:
-        parts = message.text.split(maxsplit=2)
-        if len(parts) < 2:
+        parts = message.text.rsplit(maxsplit=1)
+        if len(parts) != 2:
             raise ValueError("Неверный формат")
         
-        dt_str = parts[0] + " " + parts[1]
-        channel_id = parts[2] if len(parts) > 2 else None
-        
-        if not channel_id:
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="← Назад", callback_data="schedule_choice")]
-            ])
-            await message.answer("❌ Укажите ID канала!\n\nФормат: <code>ДД.ММ.ГГГГ ЧЧ:ММ @channel</code>", reply_markup=kb)
-            return
-        
+        dt_str, channel_id = parts
         dt = datetime.strptime(dt_str, "%d.%m.%Y %H:%M")
-        if dt < datetime.now():
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="← Назад", callback_data="schedule_choice")]
-            ])
-            await message.answer("❌ Дата уже прошла! Введите будущую дату.", reply_markup=kb)
-            return
         
-        try:
-            chat = await bot.get_chat(channel_id)
-            member = await bot.get_chat_member(channel_id, bot.id)
-            if not member.can_post_messages:
-                raise Exception("Нет прав")
-        except:
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="← Назад", callback_data="schedule_choice")]
-            ])
-            await message.answer("❌ Неверный канал или нет прав!", reply_markup=kb)
-            return
+        if dt < datetime.now():
+            raise ValueError("Дата в прошлом")
+        
+        chat = await bot.get_chat(channel_id)
+        member = await bot.get_chat_member(channel_id, bot.id)
+        if not member.can_post_messages:
+            raise ValueError("Нет прав")
         
         post_id = str(uuid.uuid4())[:8]
         scheduled_posts.append((
@@ -739,36 +708,32 @@ async def process_schedule(message: Message, state: FSMContext):
         user_data[uid]["stats"]["scheduled_active"] += 1
         
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📅 К запланированным", callback_data="scheduled")],
-            [InlineKeyboardButton(text="← Главное меню", callback_data="back_main")]
+            [InlineKeyboardButton(text="📅 Запланированные", callback_data="scheduled")],
+            [InlineKeyboardButton(text="← Меню", callback_data="back_main")]
         ])
         
         await message.answer(
-            f"✅ Пост запланирован!\n\n"
-            f"📅 Дата: <b>{dt.strftime('%d.%m.%Y %H:%M')}</b>\n"
-            f"📢 Канал: <b>{chat.title}</b>\n"
-            f"🆔 ID: <code>{post_id}</code>",
+            f"✅ Запланировано!\n📅 {dt.strftime('%d.%m.%Y %H:%M')}\n📢 {chat.title}",
             reply_markup=kb
         )
         await state.clear()
         
-    except ValueError:
+    except Exception as e:
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="← Назад", callback_data="schedule_choice")]
+            [InlineKeyboardButton(text="← Назад", callback_data="schedule_post")]
         ])
-        await message.answer("❌ Неверный формат!\n\nИспользуй: <code>ДД.ММ.ГГГГ ЧЧ:ММ @channel</code>", reply_markup=kb)
+        await message.answer(f"❌ Ошибка: {e}\n\nПроверьте формат!", reply_markup=kb)
 
-# ====================== НАЗАД К ПРЕДПРОСМОТРУ ======================
 @router.callback_query(F.data == "back_to_preview")
 async def back_to_preview(callback: CallbackQuery, state: FSMContext):
-    await show_preview_with_choice(callback.message, state)
+    await show_preview(callback.message, state)
     await callback.answer()
 
-# ====================== ЗАПЛАНИРОВАННЫЕ ПОСТЫ ======================
+# ====================== ЗАПЛАНИРОВАННЫЕ ======================
 @router.callback_query(F.data == "scheduled")
 async def show_scheduled(callback: CallbackQuery):
     if not await check_subscription(callback.from_user.id):
-        await callback.answer("❌ Требуется активная подписка!", show_alert=True)
+        await callback.answer("❌ Требуется подписка!", show_alert=True)
         return
     
     uid = callback.from_user.id
@@ -776,215 +741,146 @@ async def show_scheduled(callback: CallbackQuery):
     
     if not user_posts:
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📝 Создать пост", callback_data="create_post")],
+            [InlineKeyboardButton(text="📝 Создать", callback_data="create_post")],
             [InlineKeyboardButton(text="← Назад", callback_data="back_main")]
         ])
-        await callback.message.edit_text(
-            "📅 <b>Запланированные посты</b>\n\n"
-            "У вас нет запланированных постов.",
-            reply_markup=kb
-        )
-        await callback.answer()
+        await callback.message.edit_text("📅 Нет запланированных постов.", reply_markup=kb)
         return
     
-    text = "📅 <b>Запланированные посты:</b>\n\n"
+    text = "📅 <b>Запланированные:</b>\n\n"
     kb = []
     
     for task in sorted(user_posts, key=lambda x: x[0]):
         dt, _, _, post_text, _, post_id, _, _, _ = task
-        preview = post_text[:30] + "..." if len(post_text) > 30 else post_text
-        text += f"• <code>{post_id}</code> — {dt.strftime('%d.%м %H:%M')}: {preview}\n"
-        kb.append([InlineKeyboardButton(
-            text=f"🗑 Удалить {post_id}", 
-            callback_data=f"delete_sched_{post_id}"
-        )])
+        preview = post_text[:25] + "..." if len(post_text) > 25 else post_text
+        text += f"• <code>{post_id}</code> {dt.strftime('%d.%m %H:%M')}: {preview}\n"
+        kb.append([InlineKeyboardButton(text=f"🗑 {post_id}", callback_data=f"del_{post_id}")])
     
     kb.append([InlineKeyboardButton(text="← Назад", callback_data="back_main")])
-    
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
-    await callback.answer()
 
-@router.callback_query(F.data.startswith("delete_sched_"))
+@router.callback_query(F.data.startswith("del_"))
 async def delete_scheduled(callback: CallbackQuery):
-    post_id = callback.data.split("_")[-1]
+    post_id = callback.data.split("_")[1]
     uid = callback.from_user.id
     
     for i, task in enumerate(scheduled_posts):
         if task[5] == post_id and task[1] == uid:
             scheduled_posts.pop(i)
             user_data[uid]["stats"]["scheduled_active"] -= 1
-            await callback.answer("✅ Пост удалён!", show_alert=True)
+            await callback.answer("✅ Удалено!", show_alert=True)
             await show_scheduled(callback)
             return
     
-    await callback.answer("❌ Пост не найден!", show_alert=True)
+    await callback.answer("❌ Не найдено!", show_alert=True)
 
-# ====================== СТАТИСТИКА ======================
+# ====================== ОСТАЛЬНОЕ ======================
 @router.callback_query(F.data == "stats")
 async def show_stats(callback: CallbackQuery):
     uid = callback.from_user.id
     stats = user_data[uid]["stats"]
     
-    blocks_usage = "\n".join([
-        f"  Блок {k}: {v} раз" 
-        for k, v in stats["blocks_used"].items()
-    ])
-    
     text = (f"📊 <b>Статистика</b>\n\n"
-            f"📝 Опубликовано постов: <b>{stats['posts']}</b>\n"
-            f"📅 Запланировано сейчас: <b>{stats['scheduled_active']}</b>\n\n"
-            f"📋 Использование блоков:\n{blocks_usage}")
+            f"📝 Опубликовано: {stats['posts']}\n"
+            f"📅 Запланировано: {stats['scheduled_active']}")
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="← Назад", callback_data="back_main")]
     ])
     await callback.message.edit_text(text, reply_markup=kb)
-    await callback.answer()
 
-# ====================== ПАРТНЁРКА ======================
 @router.callback_query(F.data == "referral")
 async def show_referral(callback: CallbackQuery):
     uid = callback.from_user.id
     bot_info = await bot.get_me()
     ref_link = f"https://t.me/{bot_info.username}?start=ref_{uid}"
-    refs = user_data[uid]["referrals"]
     
-    text = (f"👥 <b>Партнёрская программа</b>\n\n"
-            f"Ваша реферальная ссылка:\n"
-            f"<code>{ref_link}</code>\n\n"
-            f"👤 Приглашено: <b>{refs}</b> чел.\n"
-            f"🎁 За каждого друга: <b>+1 день</b> подписки\n\n"
-            f"Поделитесь ссылкой с друзьями!")
+    text = (f"👥 <b>Партнёрка</b>\n\n"
+            f"Ссылка:\n<code>{ref_link}</code>\n\n"
+            f"👤 Приглашено: {user_data[uid]['referrals']}\n"
+            f"🎁 +1 день за друга")
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📤 Поделиться", url=f"https://t.me/share/url?url={ref_link}&text=Удобный бот для оформления постов!")],
+        [InlineKeyboardButton(text="📤 Поделиться", url=f"https://t.me/share/url?url={ref_link}")],
         [InlineKeyboardButton(text="← Назад", callback_data="back_main")]
     ])
     await callback.message.edit_text(text, reply_markup=kb)
-    await callback.answer()
 
-# ====================== НАСТРОЙКИ ======================
 @router.callback_query(F.data == "settings")
 async def show_settings(callback: CallbackQuery):
     uid = callback.from_user.id
     s = user_data[uid]["settings"]
     
-    text = (f"⚙️ <b>Настройки публикации</b>\n\n"
-            f"🔕 Беззвучный режим: {'✅' if s['silent'] else '❌'}\n"
-            f"🔒 Защита контента: {'✅' if s['protect'] else '❌'}\n"
-            f"🔗 Отключить превью: {'✅' if s['disable_preview'] else '❌'}\n"
-            f"📌 Авто-закреп: {'✅' if s['auto_pin'] else '❌'} (скоро)")
+    text = (f"⚙️ <b>Настройки</b>\n\n"
+            f"🔕 Тихий: {'✅' if s['silent'] else '❌'}\n"
+            f"🔒 Защита: {'✅' if s['protect'] else '❌'}\n"
+            f"🔗 Без превью: {'✅' if s['disable_preview'] else '❌'}")
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text=f"{'✅' if s['silent'] else '❌'} Беззвучный режим", 
-            callback_data="toggle_silent"
-        )],
-        [InlineKeyboardButton(
-            text=f"{'✅' if s['protect'] else '❌'} Защита контента", 
-            callback_data="toggle_protect"
-        )],
-        [InlineKeyboardButton(
-            text=f"{'✅' if s['disable_preview'] else '❌'} Откл. превью ссылок", 
-            callback_data="toggle_preview"
-        )],
+        [InlineKeyboardButton(text=f"{'✅' if s['silent'] else '❌'} Тихий", callback_data="toggle_silent")],
+        [InlineKeyboardButton(text=f"{'✅' if s['protect'] else '❌'} Защита", callback_data="toggle_protect")],
+        [InlineKeyboardButton(text=f"{'✅' if s['disable_preview'] else '❌'} Без превью", callback_data="toggle_preview")],
         [InlineKeyboardButton(text="← Назад", callback_data="back_main")]
     ])
     await callback.message.edit_text(text, reply_markup=kb)
-    await callback.answer()
 
 @router.callback_query(F.data.startswith("toggle_"))
 async def toggle_setting(callback: CallbackQuery):
     uid = callback.from_user.id
-    setting_map = {
-        "toggle_silent": "silent",
-        "toggle_protect": "protect", 
-        "toggle_preview": "disable_preview"
-    }
-    
-    key = setting_map.get(callback.data)
-    if key:
+    key = callback.data.replace("toggle_", "")
+    if key in ["silent", "protect", "disable_preview"]:
         user_data[uid]["settings"][key] = not user_data[uid]["settings"][key]
         await show_settings(callback)
 
-# ====================== ИНФО ======================
 @router.callback_query(F.data == "info")
 async def show_info(callback: CallbackQuery):
-    text = (f"ℹ️ <b>Как это работает</b>\n\n"
-            f"<b>1. Настройка (1 раз)</b>\n"
-            f"• Заполните 4 блока (подписи, хэштеги, ссылки)\n"
-            f"• Загрузите фото в галерею\n\n"
-            f"<b>2. Создание поста</b>\n"
-            f"• Нажмите «Создать пост»\n"
-            f"• Введите основной текст\n"
-            f"• Выберите картинку (или без неё)\n"
-            f"• Бот автоматически добавит ваши блоки\n\n"
-            f"<b>3. Публикация</b>\n"
-            f"• <b>Опубликовать сейчас</b> — мгновенно в канал\n"
-            f"• <b>Запланировать</b> — отложенная публикация\n"
-            f"• Настройки: беззвучный режим, защита контента\n\n"
-            f"<b>💡 Совет:</b> Используйте реферальную программу — "
-            f"получайте +1 день за каждого приглашённого друга!")
+    text = ("ℹ️ <b>Как работает</b>\n\n"
+            "1️⃣ Настрой 4 блока один раз\n"
+            "2️⃣ Загрузи фото в галерею\n"
+            "3️⃣ Создавай посты в 2 клика\n\n"
+            "Бот автоматически добавит блоки к посту!")
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="← Назад", callback_data="back_main")]
     ])
     await callback.message.edit_text(text, reply_markup=kb)
-    await callback.answer()
 
-# ====================== ПОДДЕРЖКА ======================
 @router.callback_query(F.data == "support")
 async def support_menu(callback: CallbackQuery, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❌ Отмена", callback_data="back_main")]
     ])
-    await callback.message.edit_text(
-        "🆘 <b>Поддержка</b>\n\n"
-        "Опишите вашу проблему или вопрос.\n"
-        "Мы ответим вам в ближайшее время.",
-        reply_markup=kb
-    )
+    await callback.message.edit_text("🆘 Опишите проблему:", reply_markup=kb)
     await state.set_state(SupportState.waiting_message)
-    await callback.answer()
 
 @router.message(SupportState.waiting_message)
 async def send_support(message: Message, state: FSMContext):
     uid = message.from_user.id
-    username = message.from_user.username or "Нет username"
-    
-    support_text = (f"🆘 <b>Новое обращение</b>\n\n"
-                    f"От: @{username} (<code>{uid}</code>)\n"
-                    f"Сообщение:\n{message.text}")
-    
     if SUPPORT_CHAT_ID:
-        await bot.send_message(SUPPORT_CHAT_ID, support_text)
-        await message.answer("✅ Сообщение отправлено! Мы свяжемся с вами.", reply_markup=main_menu())
+        await bot.send_message(SUPPORT_CHAT_ID, f"🆘 От @{message.from_user.username}:\n{message.text}")
+        await message.answer("✅ Отправлено!", reply_markup=main_menu())
     else:
-        await message.answer("❌ Служба поддержки временно недоступна.", reply_markup=main_menu())
-    
+        await message.answer("❌ Поддержка недоступна", reply_markup=main_menu())
     await state.clear()
 
-# ====================== НАЗАД ======================
 @router.callback_query(F.data == "back_main")
 async def back_main(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.edit_text("👋 Главное меню", reply_markup=main_menu())
     await callback.answer()
 
-# ====================== КОМАНДЫ ======================
+# ====================== ЗАПУСК ======================
 async def set_commands():
-    commands = [
+    await bot.set_my_commands([
         BotCommand(command="start", description="Главное меню"),
         BotCommand(command="done", description="Завершить загрузку фото"),
-    ]
-    await bot.set_my_commands(commands)
+    ])
 
-# ====================== ЗАПУСК ======================
 async def main():
     await set_commands()
     asyncio.create_task(scheduler())
     logging.basicConfig(level=logging.INFO)
-    print("🚀 Content Formatter Bot запущен!")
+    print("🚀 Бот запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
